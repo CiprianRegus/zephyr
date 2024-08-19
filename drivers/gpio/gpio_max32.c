@@ -85,9 +85,9 @@ static int api_pin_configure(const struct device *dev, gpio_pin_t pin, gpio_flag
 	gpio_cfg.mask = BIT(pin);
 
 	if (flags & GPIO_PULL_UP) {
-		gpio_cfg.pad = MXC_GPIO_PAD_PULL_UP;
+		gpio_cfg.pad = MXC_GPIO_PAD_STRONG_PULL_UP;
 	} else if (flags & GPIO_PULL_DOWN) {
-		gpio_cfg.pad = MXC_GPIO_PAD_PULL_DOWN;
+		gpio_cfg.pad = MXC_GPIO_PAD_STRONG_PULL_DOWN;
 	} else if (flags & MAX32_GPIO_WEAK_PULL_UP) {
 		gpio_cfg.pad = MXC_GPIO_PAD_WEAK_PULL_UP;
 	} else if (flags & MAX32_GPIO_WEAK_PULL_DOWN) {
