@@ -45,9 +45,9 @@ static int pinctrl_configure_pin(pinctrl_soc_pin_t soc_pin)
 	gpio_cfg.mask = BIT(pin);
 
 	if (pincfg & BIT(MAX32_BIAS_PULL_UP_SHIFT)) {
-		gpio_cfg.pad = MXC_GPIO_PAD_PULL_UP;
+		gpio_cfg.pad = MXC_GPIO_PAD_STRONG_PULL_UP;
 	} else if (pincfg & BIT(MAX32_BIAS_PULL_DOWN_SHIFT)) {
-		gpio_cfg.pad = MXC_GPIO_PAD_PULL_DOWN;
+		gpio_cfg.pad = MXC_GPIO_PAD_STRONG_PULL_DOWN;
 	} else {
 		gpio_cfg.pad = MXC_GPIO_PAD_NONE;
 	}
