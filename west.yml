@@ -23,8 +23,6 @@ manifest:
       url-base: https://github.com/zephyrproject-rtos
     - name: babblesim
       url-base: https://github.com/BabbleSim
-    - name: hal_adi
-      url-base: /home/xvr/Downloads/hal_adi
 
   group-filter: [-babblesim, -optional]
 
@@ -141,6 +139,7 @@ manifest:
     - name: hal_adi
       revision: 1a700a62511c96d8c3d8b4e29c9503855fec50c5
       path: modules/hal/adi
+      url: /home/xvr/Downloads/hal_adi
       groups:
         - hal
     - name: hal_altera
