@@ -304,7 +304,7 @@ static int api_irq_tx_ready(const struct device *dev)
 	uint32_t inten = Wrap_MXC_UART_GetRegINTEN(cfg->regs);
 
 	return ((inten & (ADI_MAX32_UART_INT_TX | ADI_MAX32_UART_INT_TX_OEM)) &&
-		!(data->status & MXC_F_UART_STATUS_TX_FULL));
+		!(data->status & MXC_F_UART_STAT_TX_FULL));
 }
 
 static void api_irq_rx_enable(const struct device *dev)
