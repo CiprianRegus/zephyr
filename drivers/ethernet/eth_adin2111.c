@@ -547,6 +547,7 @@ static int adin2111_read_fifo(const struct device *dev, const uint16_t port_idx)
 
 	iface = ((struct adin2111_port_data *)ctx->port[port_idx]->data)->iface;
 
+	printf("ADIN2111 RX\n");
 	/* get received frame size in bytes */
 	ret = eth_adin2111_reg_read(dev, fsize_reg, &fsize);
 	if (ret < 0) {
@@ -1558,7 +1559,7 @@ static const struct ethernet_api adin2111_port_api = {
 		.offload_sem = Z_SEM_INITIALIZER(name##_data_##inst.offload_sem, 0, 1),		\
 		.lock = Z_MUTEX_INITIALIZER(name##_data_##inst.lock),				\
 		.buf = name##_buffer_##inst,							\
-		.oa = DT_INST_PROP(inst, spi_oa),						\
+		.oa = DT_INST_PROP_OR(inst, spi_oa, NULL),						\
 		.oa_prot = DT_INST_PROP(inst, spi_oa_protection),				\
 		.oa_cps = 64,									\
 		.oa_tx_buf = COND_CODE_1(DT_INST_PROP(inst, spi_oa),				\

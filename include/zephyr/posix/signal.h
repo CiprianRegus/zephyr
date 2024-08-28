@@ -13,6 +13,8 @@
 extern "C" {
 #endif
 
+#define SIG_ERR	-1
+
 #define SIGHUP    1  /**< Hangup */
 #define SIGINT    2  /**< Interrupt */
 #define SIGQUIT   3  /**< Quit */

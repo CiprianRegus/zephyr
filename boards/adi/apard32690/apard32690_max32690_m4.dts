@@ -73,6 +73,12 @@
 
 &gpio2 {
 	status = "okay";
+
+	adin1110-cfg1 {
+		gpio-hog;
+		gpios = <0 GPIO_ACTIVE_HIGH>;
+		output-high;
+	};
 };
 
 &gpio3 {
@@ -110,25 +116,26 @@ arduino_spi: &spi1 {
 	pinctrl-names = "default";
 };
 
-&spi3a_miso_p0_20 {
+&spi2a_miso_p2_3 {
+	power-source = <MAX32_VSEL_VDDIOH>;
+	bias-pull-up;
+};
+
+&spi2a_mosi_p2_4 {
 	power-source = <MAX32_VSEL_VDDIOH>;
 };
 
-&spi3a_mosi_p0_21 {
+&spi2a_sck_p2_2 {
 	power-source = <MAX32_VSEL_VDDIOH>;
 };
 
-&spi3a_sck_p0_16 {
-	power-source = <MAX32_VSEL_VDDIOH>;
-};
-
-&spi3a_ss0_p0_19 {
+&spi2a_ss0_p2_5 {
 	power-source = <MAX32_VSEL_VDDIOH>;
 };
 
 &spi3 {
-	pinctrl-0 = <&spi3a_miso_p0_20 &spi3a_mosi_p0_21 &spi3a_sck_p0_16
-		     &spi3a_ss0_p0_19>;
+	pinctrl-0 = <&spi2a_miso_p2_3 &spi2a_mosi_p2_4 &spi2a_sck_p2_2
+		     &spi2a_ss0_p2_5>;
 	pinctrl-names = "default";
 	status = "okay";
 
@@ -136,8 +143,8 @@ arduino_spi: &spi1 {
 		compatible = "adi,adin1110";
 		reg = <0x0>;
 		spi-max-frequency = <DT_FREQ_M(25)>;
-		int-gpios = <&gpio0 17 (GPIO_ACTIVE_LOW | MAX32_GPIO_VSEL_VDDIOH)>;
-		reset-gpios = <&gpio0 15 (GPIO_ACTIVE_LOW | MAX32_GPIO_VSEL_VDDIOH)>;
+		int-gpios = <&gpio2 6 (GPIO_ACTIVE_LOW | MAX32_GPIO_VSEL_VDDIOH)>;
+		reset-gpios = <&gpio2 1 (GPIO_ACTIVE_LOW | MAX32_GPIO_VSEL_VDDIOH)>;
 		status = "okay";
 
 		port1 {
