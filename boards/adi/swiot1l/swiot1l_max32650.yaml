@@ -1,0 +1,18 @@
+identifier: swiot1l/max32650
+name: swiot1l m4
+vendor: adi
+type: mcu
+arch: arm
+toolchain:
+  - zephyr
+  - gnuarmemb
+  - xtools
+supported:
+  - arduino_serial
+  - arduino_spi
+  - gpio
+  - serial
+  - spi
+  - trng
+ram: 1024
+flash: 3072
