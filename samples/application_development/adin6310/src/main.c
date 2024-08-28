@@ -358,10 +358,6 @@ int32_t timesync(uint8_t mac_addr[6]) {
 
 int adin6310_enable_pse(struct device *ltc4296, uint8_t switch_op)
 {
-	/* PoDL is disabled for switch_op == 1 */
-	if (FIELD_GET(BIT(0), switch_op) == 1)
-		return 0;
-
 	return device_init(ltc4296);
 }
 
@@ -479,58 +475,51 @@ int main(void)
 
 	printf("%02x\n", mac_addr[5]);
 
-	if (switch_op & BIT(0)) {
-		printf("PSE disabled\n");
-		ret = adin6310_vlan_example();
-		if (ret) {
-			printf("VLAN init error!\n");
-			return ret;
-		}
-	} else {
-		printf("PSE enabled\n");
-		ret = adin6310_vlan_example();
-		if (ret) {
-			printf("VLAN init error!\n");
-			return ret;
-		}
+	
+	printf("PSE enabled\n");
+	ret = adin6310_vlan_example();
+	if (ret) {
+		printf("VLAN init error!\n");
+		return ret;
 	}
 
-	if (switch_op & BIT(1)){
-		printf("Time Synchonization example\n");
-		ret = timesync(mac_addr);
-		if (ret) {
-			printf("Could not initialize Time Sync\n");
-			return ret;
-		}
-
-		for (uint8_t i = 0; i < 6; i++) {
-			mac_addr[5]++;
-			ret = SES_SetMacAddress(i + 1, mac_addr);
-			printf("Set MAC Address for port%d :: %d\n",i, ret);
-		}
+	printf("Time Synchonization example\n");
+	ret = timesync(mac_addr);
+	if (ret) {
+		printf("Could not initialize Time Sync\n");
+		return ret;
 	}
 
-	if (switch_op & BIT(2)){
-		printf("LLDP Protcol\n");
-		if (SES_LLDP_Init() != 1)
-		{		
-			ret = SES_LLDP_Start();
-		}
-		if (ret) {
-			printf("LLDP Init Error!!\n");
-			return ret;
-		}
+	for (uint8_t i = 0; i < 6; i++) {
+		mac_addr[5]++;
+		ret = SES_SetMacAddress(i + 1, mac_addr);
+		printf("Set MAC Address for port%d :: %d\n",i, ret);
 	}
 
-	if (switch_op & BIT(3)){
-		printf("IGMP Snooping\n");
-		ret = SES_IgmpEnable();
-		if (ret) {
-			printf("IGMP init error\n");
-			return ret;
-		}
+	printf("LLDP Protcol\n");
+	if (SES_LLDP_Init() != 1)
+	{		
+		ret = SES_LLDP_Start();
+	}
+	if (ret) {
+		printf("LLDP Init Error!!\n");
+		return ret;
 	}
 
+	ret = SES_StartMRP();
+	if (ret) {
+		printf("MRP Init Error!!\n");
+		return ret;
+	}
+
+	printf("MRP Protocol\n");
+	ret = SES_SetRingPorts(SES_macPort4, SES_macPort5);
+	if (ret){
+		printf("Could not set ring ports\n");
+		return ret;
+	}
+
+	printf("Ring Ports 4 & 5 set\n");
 	printf("Configuration done\n");
 
 	while (1) {
