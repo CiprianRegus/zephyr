@@ -14,6 +14,7 @@
 #include "nativeapp.h"
 #include "tppdu.h"
 #include "datatypes.h"
+#include "shared.h"
 
 #include "hssems.h"
 #include "hsudp.h"
@@ -546,7 +547,18 @@ void shutdown_server(void)
 
 void *run_io(void *data)
 {
-	while (1){
+	sharedArgs_s *pshared = (sharedArgs_s *)data;
+
+	// memset(pshared->padc, 0xEF, 4 * sizeof(pshared->padc));
+
+	for (int idx = 0;; idx++){
+		sem_wait(pshared->pSemaPhore);
+		for (int i = 0; i < 3; i++){
+			pshared->padc[i] = 0x7845 + (idx << 8);
+		}
+		*pshared->upCnt++;
+		sem_post(pshared->pSemaPhore);
+
 		printf("run_io running\n");
 		k_sleep(K_MSEC(1000));
 	}

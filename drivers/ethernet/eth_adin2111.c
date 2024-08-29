@@ -547,7 +547,6 @@ static int adin2111_read_fifo(const struct device *dev, const uint16_t port_idx)
 
 	iface = ((struct adin2111_port_data *)ctx->port[port_idx]->data)->iface;
 
-	printf("ADIN2111 RX\n");
 	/* get received frame size in bytes */
 	ret = eth_adin2111_reg_read(dev, fsize_reg, &fsize);
 	if (ret < 0) {
