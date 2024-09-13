@@ -441,12 +441,6 @@ int main(void)
 	mac_addr[4] = rand();
 	mac_addr[5] = rand();
 
-	ret = adin6310_enable_pse(ltc4296_dev, switch_op);
-	if (ret){
-		printf("Could not initialize %s\n", ltc4296_dev->name);
-		return ret;
-	}
-
 	ret = SES_Init();
 	if (ret)
 		printf("SES_Init() error\n");
@@ -475,8 +469,15 @@ int main(void)
 
 	printf("%02x\n", mac_addr[5]);
 
-	
-	printf("PSE enabled\n");
+	if ((switch_op & BIT(0)) == 0){
+		ret = adin6310_enable_pse(ltc4296_dev, switch_op);
+		if (ret){
+			printf("Could not initialize %s\n", ltc4296_dev->name);
+			return ret;
+		}
+		printf("PSE enabled\n");
+	}
+
 	ret = adin6310_vlan_example();
 	if (ret) {
 		printf("VLAN init error!\n");
