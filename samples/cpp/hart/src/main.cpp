@@ -491,7 +491,7 @@ errVal_t create_hs_semaphores(uint8_t createFlag)
 		}
 
 		errVal = NO_ERROR;
-	} while (FALSE);
+	} while (0);
 
 	if ((createFlag) && (errVal == NO_ERROR))
 	{
@@ -559,8 +559,8 @@ void *run_io(void *data)
 		*pshared->upCnt++;
 		sem_post(pshared->pSemaPhore);
 
-		printf("run_io running\n");
-		k_sleep(K_MSEC(1000));
+		// printf("run_io running\n");
+		k_sleep(K_MSEC(10));
 	}
 
 	return NULL;
@@ -570,6 +570,7 @@ int main(void)
 {
 	int ret;
 	errVal_t errval = NO_ERROR;
+	char *app_name = "ZephyrHART";
 
 	// NativeApp app("ZephyrHART", "0.0");
 	// pGlobalApp = &app;
@@ -601,13 +602,13 @@ int main(void)
 	ret = create_hs_threads();
 	printf("create_hs_threads() ret %d\n", ret);
 
-	NativeApp app("ZephyrHART", "0.0");
+	NativeApp app(app_name, "0.0");
 	pGlobalApp = &app;
 
 	AppConnector<AppPdu> globalAppConnector; // ctor sets config, incl address
 	pAppConnector = &globalAppConnector;
 
-	errval = app.commandline(0, NULL);
+	errval = app.commandline(1, &app_name);
 	printf("commandline ret %d\n", errval);
 
 	errval = app.configure();
