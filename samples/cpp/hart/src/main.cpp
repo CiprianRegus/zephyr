@@ -556,7 +556,7 @@ void *run_io(void *data)
 		for (int i = 0; i < 3; i++){
 			pshared->padc[i] = 0x7845 + (idx << 8);
 		}
-		*pshared->upCnt++;
+		(*pshared->upCnt)++;
 		sem_post(pshared->pSemaPhore);
 
 		// printf("run_io running\n");
