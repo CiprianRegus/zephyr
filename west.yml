@@ -39,13 +39,13 @@ manifest:
       groups:
         - hal
     - name: hipflowapp
-      revision: ca8696ae7de25b82b86fc2742649aefcf19c0d3c
+      revision: f60526a93d7aca99488d96174dd157999c721412
       path: modules/hipflowapp
       url: https://github.com/CiprianRegus/hipflowapp.git
       groups:
         - hal
     - name: hipserver
-      revision: 1d563c21d24e4e2c89dc8c63d810e38d0955e6d4
+      revision: d956fa9c833308765b6f387263c29d316eedb762
       path: modules/hipflowapp/hipflowapp/Hip_Native/hipserver
       url: https://github.com/CiprianRegus/hipserver.git
       groups:
