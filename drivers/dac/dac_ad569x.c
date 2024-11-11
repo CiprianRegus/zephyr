@@ -77,6 +77,11 @@ static int ad569x_channel_setup(const struct device *dev, const struct dac_chann
 		return -EINVAL;
 	}
 
+	if (channel_cfg->internal) {
+		LOG_ERR("Internal channels not supported");
+		return -ENOTSUP;
+	}
+
 	return 0;
 }
 
@@ -118,6 +123,8 @@ static int ad569x_write_value(const struct device *dev, uint8_t channel, uint32_
 		LOG_ERR("invalid value %d", value);
 		return -EINVAL;
 	}
+
+	value <<= 16 - config->resolution;
 
 	return ad569x_write(dev, AD569X_CMD_WRITE_AND_UPDATE, value);
 }

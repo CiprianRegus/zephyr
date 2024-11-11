@@ -5,6 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+from math import log10
 import multiprocessing
 import os
 import pickle
@@ -20,12 +21,14 @@ from multiprocessing import Lock, Process, Value
 from multiprocessing.managers import BaseManager
 from typing import List
 from packaging import version
+import pathlib
 
 from colorama import Fore
 from domains import Domains
 from twisterlib.cmakecache import CMakeCache
 from twisterlib.environment import canonical_zephyr_base
-from twisterlib.error import BuildError, ConfigurationError
+from twisterlib.error import BuildError, ConfigurationError, StatusAttributeError
+from twisterlib.statuses import TwisterStatus
 
 import elftools
 from elftools.elf.elffile import ELFFile
@@ -60,12 +63,16 @@ class ExecutionCounter(object):
     def __init__(self, total=0):
         '''
         Most of the stats are at test instance level
-        Except that "_cases" and "_skipped_cases" are for cases of ALL test instances
+        Except that case statistics are for cases of ALL test instances
 
-        total complete = done + skipped_filter
         total = yaml test scenarios * applicable platforms
-        complete perctenage = (done + skipped_filter) / total
+        done := instances that reached report_out stage of the pipeline
+        done = skipped_configs + passed + failed + error
+        completed = done - skipped_filter
+        skipped_configs = skipped_runtime + skipped_filter
+
         pass rate = passed / (total - skipped_configs)
+        case pass rate = passed_cases / (cases - filtered_cases - skipped_cases)
         '''
         # instances that go through the pipeline
         # updated by report_out()
@@ -78,6 +85,10 @@ class ExecutionCounter(object):
         # updated by report_out()
         self._passed = Value('i', 0)
 
+        # instances that are built but not runnable
+        # updated by report_out()
+        self._notrun = Value('i', 0)
+
         # static filter + runtime filter + build skipped
         # updated by update_counting_before_pipeline() and report_out()
         self._skipped_configs = Value('i', 0)
@@ -86,12 +97,9 @@ class ExecutionCounter(object):
         # updated by report_out()
         self._skipped_runtime = Value('i', 0)
 
-        # staic filtered at yaml parsing time
+        # static filtered at yaml parsing time
         # updated by update_counting_before_pipeline()
         self._skipped_filter = Value('i', 0)
-
-        # updated by update_counting_before_pipeline() and report_out()
-        self._skipped_cases = Value('i', 0)
 
         # updated by report_out() in pipeline
         self._error = Value('i', 0)
@@ -100,24 +108,83 @@ class ExecutionCounter(object):
         # initialized to number of test instances
         self._total = Value('i', total)
 
+        #######################################
+        # TestCase counters for all instances #
+        #######################################
         # updated in report_out
         self._cases = Value('i', 0)
+
+        # updated by update_counting_before_pipeline() and report_out()
+        self._skipped_cases = Value('i', 0)
+        self._filtered_cases = Value('i', 0)
+
+        # updated by report_out() in pipeline
+        self._passed_cases = Value('i', 0)
+        self._notrun_cases = Value('i', 0)
+        self._failed_cases = Value('i', 0)
+        self._error_cases = Value('i', 0)
+        self._blocked_cases = Value('i', 0)
+
+        # Incorrect statuses
+        self._none_cases = Value('i', 0)
+        self._started_cases = Value('i', 0)
+
+
         self.lock = Lock()
 
+    @staticmethod
+    def _find_number_length(n):
+        if n > 0:
+            length = int(log10(n))+1
+        elif n == 0:
+            length = 1
+        else:
+            length = int(log10(-n))+2
+        return length
+
     def summary(self):
-        print("--------------------------------")
-        print(f"Total test suites: {self.total}") # actually test instances
-        print(f"Total test cases: {self.cases}")
-        print(f"Executed test cases: {self.cases - self.skipped_cases}")
-        print(f"Skipped test cases: {self.skipped_cases}")
-        print(f"Completed test suites: {self.done}")
-        print(f"Passing test suites: {self.passed}")
-        print(f"Failing test suites: {self.failed}")
-        print(f"Skipped test suites: {self.skipped_configs}")
-        print(f"Skipped test suites (runtime): {self.skipped_runtime}")
-        print(f"Skipped test suites (filter): {self.skipped_filter}")
-        print(f"Errors: {self.error}")
-        print("--------------------------------")
+        executed_cases = self.cases - self.skipped_cases - self.filtered_cases
+        completed_configs = self.done - self.skipped_filter
+
+        # Find alignment length for aesthetic printing
+        suites_n_length = self._find_number_length(self.total if self.total > self.done else self.done)
+        processed_suites_n_length = self._find_number_length(self.done)
+        completed_suites_n_length = self._find_number_length(completed_configs)
+        skipped_suites_n_length = self._find_number_length(self.skipped_configs)
+        total_cases_n_length = self._find_number_length(self.cases)
+        executed_cases_n_length = self._find_number_length(executed_cases)
+
+        print("--------------------------------------------------")
+        print(f"{'Total test suites: ':<23}{self.total:>{suites_n_length}}") # actually test instances
+        print(f"{'Processed test suites: ':<23}{self.done:>{suites_n_length}}")
+        print(f"├─ {'Filtered test suites (static): ':<37}{self.skipped_filter:>{processed_suites_n_length}}")
+        print(f"└─ {'Completed test suites: ':<37}{completed_configs:>{processed_suites_n_length}}")
+        print(f"   ├─ {'Filtered test suites (at runtime): ':<37}{self.skipped_runtime:>{completed_suites_n_length}}")
+        print(f"   ├─ {'Passed test suites: ':<37}{self.passed:>{completed_suites_n_length}}")
+        print(f"   ├─ {'Built only test suites: ':<37}{self.notrun:>{completed_suites_n_length}}")
+        print(f"   ├─ {'Failed test suites: ':<37}{self.failed:>{completed_suites_n_length}}")
+        print(f"   └─ {'Errors in test suites: ':<37}{self.error:>{completed_suites_n_length}}")
+        print(f"")
+        print(f"{'Filtered test suites: ':<21}{self.skipped_configs}")
+        print(f"├─ {'Filtered test suites (static): ':<37}{self.skipped_filter:>{skipped_suites_n_length}}")
+        print(f"└─ {'Filtered test suites (at runtime): ':<37}{self.skipped_runtime:>{skipped_suites_n_length}}")
+        print("----------------------      ----------------------")
+        print(f"{'Total test cases: ':<18}{self.cases}")
+        print(f"├─ {'Filtered test cases: ':<21}{self.filtered_cases:>{total_cases_n_length}}")
+        print(f"├─ {'Skipped test cases: ':<21}{self.skipped_cases:>{total_cases_n_length}}")
+        print(f"└─ {'Executed test cases: ':<21}{executed_cases:>{total_cases_n_length}}")
+        print(f"   ├─ {'Passed test cases: ':<25}{self.passed_cases:>{executed_cases_n_length}}")
+        print(f"   ├─ {'Built only test cases: ':<25}{self.notrun_cases:>{executed_cases_n_length}}")
+        print(f"   ├─ {'Blocked test cases: ':<25}{self.blocked_cases:>{executed_cases_n_length}}")
+        print(f"   ├─ {'Failed test cases: ':<25}{self.failed_cases:>{executed_cases_n_length}}")
+        print(f"   {'├' if self.none_cases or self.started_cases else '└'}─ {'Errors in test cases: ':<25}{self.error_cases:>{executed_cases_n_length}}")
+        if self.none_cases or self.started_cases:
+            print(f"   ├──── The following test case statuses should not appear in a proper execution ───")
+        if self.none_cases:
+            print(f"   {'├' if self.started_cases else '└'}─ {'Statusless test cases: ':<25}{self.none_cases:>{executed_cases_n_length}}")
+        if self.started_cases:
+            print(f"   └─ {'Test cases only started: ':<25}{self.started_cases:>{executed_cases_n_length}}")
+        print("--------------------------------------------------")
 
     @property
     def cases(self):
@@ -129,6 +196,10 @@ class ExecutionCounter(object):
         with self._cases.get_lock():
             self._cases.value = value
 
+    def cases_increment(self, value=1):
+        with self._cases.get_lock():
+            self._cases.value += value
+
     @property
     def skipped_cases(self):
         with self._skipped_cases.get_lock():
@@ -138,6 +209,122 @@ class ExecutionCounter(object):
     def skipped_cases(self, value):
         with self._skipped_cases.get_lock():
             self._skipped_cases.value = value
+
+    def skipped_cases_increment(self, value=1):
+        with self._skipped_cases.get_lock():
+            self._skipped_cases.value += value
+
+    @property
+    def filtered_cases(self):
+        with self._filtered_cases.get_lock():
+            return self._filtered_cases.value
+
+    @filtered_cases.setter
+    def filtered_cases(self, value):
+        with self._filtered_cases.get_lock():
+            self._filtered_cases.value = value
+
+    def filtered_cases_increment(self, value=1):
+        with self._filtered_cases.get_lock():
+            self._filtered_cases.value += value
+
+    @property
+    def passed_cases(self):
+        with self._passed_cases.get_lock():
+            return self._passed_cases.value
+
+    @passed_cases.setter
+    def passed_cases(self, value):
+        with self._passed_cases.get_lock():
+            self._passed_cases.value = value
+
+    def passed_cases_increment(self, value=1):
+        with self._passed_cases.get_lock():
+            self._passed_cases.value += value
+
+    @property
+    def notrun_cases(self):
+        with self._notrun_cases.get_lock():
+            return self._notrun_cases.value
+
+    @notrun_cases.setter
+    def notrun_cases(self, value):
+        with self._notrun.get_lock():
+            self._notrun.value = value
+
+    def notrun_cases_increment(self, value=1):
+        with self._notrun_cases.get_lock():
+            self._notrun_cases.value += value
+
+    @property
+    def failed_cases(self):
+        with self._failed_cases.get_lock():
+            return self._failed_cases.value
+
+    @failed_cases.setter
+    def failed_cases(self, value):
+        with self._failed_cases.get_lock():
+            self._failed_cases.value = value
+
+    def failed_cases_increment(self, value=1):
+        with self._failed_cases.get_lock():
+            self._failed_cases.value += value
+
+    @property
+    def error_cases(self):
+        with self._error_cases.get_lock():
+            return self._error_cases.value
+
+    @error_cases.setter
+    def error_cases(self, value):
+        with self._error_cases.get_lock():
+            self._error_cases.value = value
+
+    def error_cases_increment(self, value=1):
+        with self._error_cases.get_lock():
+            self._error_cases.value += value
+
+    @property
+    def blocked_cases(self):
+        with self._blocked_cases.get_lock():
+            return self._blocked_cases.value
+
+    @blocked_cases.setter
+    def blocked_cases(self, value):
+        with self._blocked_cases.get_lock():
+            self._blocked_cases.value = value
+
+    def blocked_cases_increment(self, value=1):
+        with self._blocked_cases.get_lock():
+            self._blocked_cases.value += value
+
+    @property
+    def none_cases(self):
+        with self._none_cases.get_lock():
+            return self._none_cases.value
+
+    @none_cases.setter
+    def none_cases(self, value):
+        with self._none_cases.get_lock():
+            self._none_cases.value = value
+
+    def none_cases_increment(self, value=1):
+        with self._none_cases.get_lock():
+            self._none_cases.value += value
+
+    @property
+    def started_cases(self):
+        with self._started_cases.get_lock():
+            return self._started_cases.value
+
+    @started_cases.setter
+    def started_cases(self, value):
+        with self._started_cases.get_lock():
+            self._started_cases.value = value
+
+    def started_cases_increment(self, value=1):
+        with self._started_cases.get_lock():
+            self._started_cases.value += value
 
     @property
     def error(self):
@@ -149,6 +336,10 @@ class ExecutionCounter(object):
         with self._error.get_lock():
             self._error.value = value
 
+    def error_increment(self, value=1):
+        with self._error.get_lock():
+            self._error.value += value
+
     @property
     def iteration(self):
         with self._iteration.get_lock():
@@ -158,6 +349,10 @@ class ExecutionCounter(object):
     def iteration(self, value):
         with self._iteration.get_lock():
             self._iteration.value = value
+
+    def iteration_increment(self, value=1):
+        with self._iteration.get_lock():
+            self._iteration.value += value
 
     @property
     def done(self):
@@ -169,6 +364,10 @@ class ExecutionCounter(object):
         with self._done.get_lock():
             self._done.value = value
 
+    def done_increment(self, value=1):
+        with self._done.get_lock():
+            self._done.value += value
+
     @property
     def passed(self):
         with self._passed.get_lock():
@@ -178,6 +377,24 @@ class ExecutionCounter(object):
     def passed(self, value):
         with self._passed.get_lock():
             self._passed.value = value
+
+    def passed_increment(self, value=1):
+        with self._passed.get_lock():
+            self._passed.value += value
+
+    @property
+    def notrun(self):
+        with self._notrun.get_lock():
+            return self._notrun.value
+
+    @notrun.setter
+    def notrun(self, value):
+        with self._notrun.get_lock():
+            self._notrun.value = value
+
+    def notrun_increment(self, value=1):
+        with self._notrun.get_lock():
+            self._notrun.value += value
 
     @property
     def skipped_configs(self):
@@ -189,6 +406,10 @@ class ExecutionCounter(object):
         with self._skipped_configs.get_lock():
             self._skipped_configs.value = value
 
+    def skipped_configs_increment(self, value=1):
+        with self._skipped_configs.get_lock():
+            self._skipped_configs.value += value
+
     @property
     def skipped_filter(self):
         with self._skipped_filter.get_lock():
@@ -198,6 +419,10 @@ class ExecutionCounter(object):
     def skipped_filter(self, value):
         with self._skipped_filter.get_lock():
             self._skipped_filter.value = value
+
+    def skipped_filter_increment(self, value=1):
+        with self._skipped_filter.get_lock():
+            self._skipped_filter.value += value
 
     @property
     def skipped_runtime(self):
@@ -209,6 +434,10 @@ class ExecutionCounter(object):
         with self._skipped_runtime.get_lock():
             self._skipped_runtime.value = value
 
+    def skipped_runtime_increment(self, value=1):
+        with self._skipped_runtime.get_lock():
+            self._skipped_runtime.value += value
+
     @property
     def failed(self):
         with self._failed.get_lock():
@@ -219,10 +448,23 @@ class ExecutionCounter(object):
         with self._failed.get_lock():
             self._failed.value = value
 
+    def failed_increment(self, value=1):
+        with self._failed.get_lock():
+            self._failed.value += value
+
     @property
     def total(self):
         with self._total.get_lock():
             return self._total.value
+
+    @total.setter
+    def total(self, value):
+        with self._total.get_lock():
+            self._total.value = value
+
+    def total_increment(self, value=1):
+        with self._total.get_lock():
+            self._total.value += value
 
 class CMake:
     config_re = re.compile('(CONFIG_[A-Za-z0-9_]+)[=]\"?([^\"]*)\"?$')
@@ -284,9 +526,11 @@ class CMake:
             msg = f"Finished building {self.source_dir} for {self.platform.name} in {duration:.2f} seconds"
             logger.debug(msg)
 
-            self.instance.status = "passed"
             if not self.instance.run:
-                self.instance.add_missing_case_status("skipped", "Test was built only")
+                self.instance.status = TwisterStatus.NOTRUN
+                self.instance.add_missing_case_status(TwisterStatus.NOTRUN, "Test was built only")
+            else:
+                self.instance.status = TwisterStatus.PASS
             ret = {"returncode": p.returncode}
 
             if out:
@@ -308,15 +552,15 @@ class CMake:
                 imgtool_overflow_found = re.findall(r"Error: Image size \(.*\) \+ trailer \(.*\) exceeds requested size", log_msg)
                 if overflow_found and not self.options.overflow_as_errors:
                     logger.debug("Test skipped due to {} Overflow".format(overflow_found[0]))
-                    self.instance.status = "skipped"
+                    self.instance.status = TwisterStatus.SKIP
                     self.instance.reason = "{} overflow".format(overflow_found[0])
                     change_skip_to_error_if_integration(self.options, self.instance)
                 elif imgtool_overflow_found and not self.options.overflow_as_errors:
-                    self.instance.status = "skipped"
+                    self.instance.status = TwisterStatus.SKIP
                     self.instance.reason = "imgtool overflow"
                     change_skip_to_error_if_integration(self.options, self.instance)
                 else:
-                    self.instance.status = "error"
+                    self.instance.status = TwisterStatus.ERROR
                     self.instance.reason = "Build failure"
 
             ret = {
@@ -329,10 +573,10 @@ class CMake:
 
         if not self.options.disable_warnings_as_errors:
             warnings_as_errors = 'y'
-            gen_defines_args = "--edtlib-Werror"
+            gen_edt_args = "--edtlib-Werror"
         else:
             warnings_as_errors = 'n'
-            gen_defines_args = ""
+            gen_edt_args = ""
 
         warning_command = 'CONFIG_COMPILER_WARNINGS_AS_ERRORS'
         if self.instance.sysbuild:
@@ -342,9 +586,11 @@ class CMake:
         cmake_args = [
             f'-B{self.build_dir}',
             f'-DTC_RUNID={self.instance.run_id}',
+            f'-DTC_NAME={self.instance.testsuite.name}',
             f'-D{warning_command}={warnings_as_errors}',
-            f'-DEXTRA_GEN_DEFINES_ARGS={gen_defines_args}',
-            f'-G{self.env.generator}'
+            f'-DEXTRA_GEN_EDT_ARGS={gen_edt_args}',
+            f'-G{self.env.generator}',
+            f'-DPython3_EXECUTABLE={pathlib.Path(sys.executable).as_posix()}'
         ]
 
         # If needed, run CMake using the package_helper script first, to only run
@@ -415,13 +661,13 @@ class CMake:
                     'filter': filter_results
                     }
         else:
-            self.instance.status = "error"
-            self.instance.reason = "Cmake build failure"
+            self.instance.status = TwisterStatus.ERROR
+            self.instance.reason = "CMake build failure"
 
             for tc in self.instance.testcases:
                 tc.status = self.instance.status
 
-            logger.error("Cmake build failure: %s for %s" % (self.source_dir, self.platform.name))
+            logger.error("CMake build failure: %s for %s" % (self.source_dir, self.platform.name))
             ret = {"returncode": p.returncode}
 
         if out:
@@ -600,127 +846,220 @@ class ProjectBuilder(FilterBuilder):
             self.log_info("{}".format(b_log), inline_logs)
 
 
+    def _add_to_pipeline(self, pipeline, op: str, additionals: dict={}):
+        try:
+            if op:
+                task = dict({'op': op, 'test': self.instance}, **additionals)
+                pipeline.put(task)
+        # Only possible RuntimeError source here is a mutation of the pipeline during iteration.
+        # If that happens, we ought to consider the whole pipeline corrupted.
+        except RuntimeError as e:
+            logger.error(f"RuntimeError: {e}")
+            traceback.print_exc()
+
+
     def process(self, pipeline, done, message, lock, results):
+        next_op = None
+        additionals = {}
+
         op = message.get('op')
 
         self.instance.setup_handler(self.env)
 
         if op == "filter":
-            ret = self.cmake(filter_stages=self.instance.filter_stages)
-            if self.instance.status in ["failed", "error"]:
-                pipeline.put({"op": "report", "test": self.instance})
-            else:
-                # Here we check the dt/kconfig filter results coming from running cmake
-                if self.instance.name in ret['filter'] and ret['filter'][self.instance.name]:
-                    logger.debug("filtering %s" % self.instance.name)
-                    self.instance.status = "filtered"
-                    self.instance.reason = "runtime filter"
-                    results.skipped_runtime += 1
-                    self.instance.add_missing_case_status("skipped")
-                    pipeline.put({"op": "report", "test": self.instance})
+            try:
+                ret = self.cmake(filter_stages=self.instance.filter_stages)
+                if self.instance.status in [TwisterStatus.FAIL, TwisterStatus.ERROR]:
+                    next_op = 'report'
                 else:
-                    pipeline.put({"op": "cmake", "test": self.instance})
+                    # Here we check the dt/kconfig filter results coming from running cmake
+                    if self.instance.name in ret['filter'] and ret['filter'][self.instance.name]:
+                        logger.debug("filtering %s" % self.instance.name)
+                        self.instance.status = TwisterStatus.FILTER
+                        self.instance.reason = "runtime filter"
+                        results.skipped_runtime_increment()
+                        self.instance.add_missing_case_status(TwisterStatus.SKIP)
+                        next_op = 'report'
+                    else:
+                        next_op = 'cmake'
+            except StatusAttributeError as sae:
+                logger.error(str(sae))
+                self.instance.status = TwisterStatus.ERROR
+                reason = 'Incorrect status assignment'
+                self.instance.reason = reason
+                self.instance.add_missing_case_status(TwisterStatus.BLOCK, reason)
+                next_op = 'report'
+            finally:
+                self._add_to_pipeline(pipeline, next_op)
 
         # The build process, call cmake and build with configured generator
         elif op == "cmake":
-            ret = self.cmake()
-            if self.instance.status in ["failed", "error"]:
-                pipeline.put({"op": "report", "test": self.instance})
-            elif self.options.cmake_only:
-                if self.instance.status is None:
-                    self.instance.status = "passed"
-                pipeline.put({"op": "report", "test": self.instance})
-            else:
-                # Here we check the runtime filter results coming from running cmake
-                if self.instance.name in ret['filter'] and ret['filter'][self.instance.name]:
-                    logger.debug("filtering %s" % self.instance.name)
-                    self.instance.status = "filtered"
-                    self.instance.reason = "runtime filter"
-                    results.skipped_runtime += 1
-                    self.instance.add_missing_case_status("skipped")
-                    pipeline.put({"op": "report", "test": self.instance})
+            try:
+                ret = self.cmake()
+                if self.instance.status in [TwisterStatus.FAIL, TwisterStatus.ERROR]:
+                    next_op = 'report'
+                elif self.options.cmake_only:
+                    if self.instance.status == TwisterStatus.NONE:
+                        logger.debug("CMake only: PASS %s" % self.instance.name)
+                        self.instance.status = TwisterStatus.NOTRUN
+                        self.instance.add_missing_case_status(TwisterStatus.NOTRUN, 'CMake only')
+                    next_op = 'report'
                 else:
-                    pipeline.put({"op": "build", "test": self.instance})
+                    # Here we check the runtime filter results coming from running cmake
+                    if self.instance.name in ret['filter'] and ret['filter'][self.instance.name]:
+                        logger.debug("filtering %s" % self.instance.name)
+                        self.instance.status = TwisterStatus.FILTER
+                        self.instance.reason = "runtime filter"
+                        results.skipped_runtime_increment()
+                        self.instance.add_missing_case_status(TwisterStatus.SKIP)
+                        next_op = 'report'
+                    else:
+                        next_op = 'build'
+            except StatusAttributeError as sae:
+                logger.error(str(sae))
+                self.instance.status = TwisterStatus.ERROR
+                reason = 'Incorrect status assignment'
+                self.instance.reason = reason
+                self.instance.add_missing_case_status(TwisterStatus.BLOCK, reason)
+                next_op = 'report'
+            finally:
+                self._add_to_pipeline(pipeline, next_op)
 
         elif op == "build":
-            logger.debug("build test: %s" % self.instance.name)
-            ret = self.build()
-            if not ret:
-                self.instance.status = "error"
-                self.instance.reason = "Build Failure"
-                pipeline.put({"op": "report", "test": self.instance})
-            else:
-                # Count skipped cases during build, for example
-                # due to ram/rom overflow.
-                if  self.instance.status == "skipped":
-                    results.skipped_runtime += 1
-                    self.instance.add_missing_case_status("skipped", self.instance.reason)
-
-                if ret.get('returncode', 1) > 0:
-                    self.instance.add_missing_case_status("blocked", self.instance.reason)
-                    pipeline.put({"op": "report", "test": self.instance})
+            try:
+                logger.debug("build test: %s" % self.instance.name)
+                ret = self.build()
+                if not ret:
+                    self.instance.status = TwisterStatus.ERROR
+                    self.instance.reason = "Build Failure"
+                    next_op = 'report'
                 else:
-                    logger.debug(f"Determine test cases for test instance: {self.instance.name}")
-                    try:
-                        self.determine_testcases(results)
-                        pipeline.put({"op": "gather_metrics", "test": self.instance})
-                    except BuildError as e:
-                        logger.error(str(e))
-                        self.instance.status = "error"
-                        self.instance.reason = str(e)
-                        pipeline.put({"op": "report", "test": self.instance})
+                    # Count skipped cases during build, for example
+                    # due to ram/rom overflow.
+                    if  self.instance.status == TwisterStatus.SKIP:
+                        results.skipped_runtime_increment()
+                        self.instance.add_missing_case_status(TwisterStatus.SKIP, self.instance.reason)
+
+                    if ret.get('returncode', 1) > 0:
+                        self.instance.add_missing_case_status(TwisterStatus.BLOCK, self.instance.reason)
+                        next_op = 'report'
+                    else:
+                        if self.instance.testsuite.harness in ['ztest', 'test']:
+                            logger.debug(f"Determine test cases for test instance: {self.instance.name}")
+                            try:
+                                self.determine_testcases(results)
+                                next_op = 'gather_metrics'
+                            except BuildError as e:
+                                logger.error(str(e))
+                                self.instance.status = TwisterStatus.ERROR
+                                self.instance.reason = str(e)
+                                next_op = 'report'
+                        else:
+                            next_op = 'gather_metrics'
+            except StatusAttributeError as sae:
+                logger.error(str(sae))
+                self.instance.status = TwisterStatus.ERROR
+                reason = 'Incorrect status assignment'
+                self.instance.reason = reason
+                self.instance.add_missing_case_status(TwisterStatus.BLOCK, reason)
+                next_op = 'report'
+            finally:
+                self._add_to_pipeline(pipeline, next_op)
 
         elif op == "gather_metrics":
-            ret = self.gather_metrics(self.instance)
-            if not ret or ret.get('returncode', 1) > 0:
-                self.instance.status = "error"
-                self.instance.reason = "Build Failure at gather_metrics."
-                pipeline.put({"op": "report", "test": self.instance})
-            elif self.instance.run and self.instance.handler.ready:
-                pipeline.put({"op": "run", "test": self.instance})
-            else:
-                pipeline.put({"op": "report", "test": self.instance})
+            try:
+                ret = self.gather_metrics(self.instance)
+                if not ret or ret.get('returncode', 1) > 0:
+                    self.instance.status = TwisterStatus.ERROR
+                    self.instance.reason = "Build Failure at gather_metrics."
+                    next_op = 'report'
+                elif self.instance.run and self.instance.handler.ready:
+                    next_op = 'run'
+                else:
+                    if self.instance.status == TwisterStatus.NOTRUN:
+                        run_conditions =  f"(run:{self.instance.run}, handler.ready:{self.instance.handler.ready})"
+                        logger.debug(f"Instance {self.instance.name} can't run {run_conditions}")
+                        self.instance.add_missing_case_status(TwisterStatus.NOTRUN, f"Nowhere to run")
+                    next_op = 'report'
+            except StatusAttributeError as sae:
+                logger.error(str(sae))
+                self.instance.status = TwisterStatus.ERROR
+                reason = 'Incorrect status assignment'
+                self.instance.reason = reason
+                self.instance.add_missing_case_status(TwisterStatus.BLOCK, reason)
+                next_op = 'report'
+            finally:
+                self._add_to_pipeline(pipeline, next_op)
 
         # Run the generated binary using one of the supported handlers
         elif op == "run":
-            logger.debug("run test: %s" % self.instance.name)
-            self.run()
-            logger.debug(f"run status: {self.instance.name} {self.instance.status}")
             try:
+                logger.debug("run test: %s" % self.instance.name)
+                self.run()
+                logger.debug(f"run status: {self.instance.name} {self.instance.status}")
+
                 # to make it work with pickle
                 self.instance.handler.thread = None
                 self.instance.handler.duts = None
-                pipeline.put({
-                    "op": "report",
-                    "test": self.instance,
+
+                next_op = 'report'
+                additionals = {
                     "status": self.instance.status,
                     "reason": self.instance.reason
-                    }
-                )
-            except RuntimeError as e:
-                logger.error(f"RuntimeError: {e}")
-                traceback.print_exc()
+                }
+            except StatusAttributeError as sae:
+                logger.error(str(sae))
+                self.instance.status = TwisterStatus.ERROR
+                reason = 'Incorrect status assignment'
+                self.instance.reason = reason
+                self.instance.add_missing_case_status(TwisterStatus.BLOCK, reason)
+                next_op = 'report'
+                additionals = {}
+            finally:
+                self._add_to_pipeline(pipeline, next_op, additionals)
 
         # Report results and output progress to screen
         elif op == "report":
-            with lock:
-                done.put(self.instance)
-                self.report_out(results)
+            try:
+                with lock:
+                    done.put(self.instance)
+                    self.report_out(results)
 
-            if not self.options.coverage:
-                if self.options.prep_artifacts_for_testing:
-                    pipeline.put({"op": "cleanup", "mode": "device", "test": self.instance})
-                elif self.options.runtime_artifact_cleanup == "pass" and self.instance.status == "passed":
-                    pipeline.put({"op": "cleanup", "mode": "passed", "test": self.instance})
-                elif self.options.runtime_artifact_cleanup == "all":
-                    pipeline.put({"op": "cleanup", "mode": "all", "test": self.instance})
+                if not self.options.coverage:
+                    if self.options.prep_artifacts_for_testing:
+                        next_op = 'cleanup'
+                        additionals = {"mode": "device"}
+                    elif self.options.runtime_artifact_cleanup == "pass" and \
+                        self.instance.status in [TwisterStatus.PASS, TwisterStatus.NOTRUN]:
+                        next_op = 'cleanup'
+                        additionals = {"mode": "passed"}
+                    elif self.options.runtime_artifact_cleanup == "all":
+                        next_op = 'cleanup'
+                        additionals = {"mode": "all"}
+            except StatusAttributeError as sae:
+                logger.error(str(sae))
+                self.instance.status = TwisterStatus.ERROR
+                reason = 'Incorrect status assignment'
+                self.instance.reason = reason
+                self.instance.add_missing_case_status(TwisterStatus.BLOCK, reason)
+                next_op = None
+                additionals = {}
+            finally:
+                self._add_to_pipeline(pipeline, next_op, additionals)
 
         elif op == "cleanup":
-            mode = message.get("mode")
-            if mode == "device":
-                self.cleanup_device_testing_artifacts()
-            elif mode == "passed" or (mode == "all" and self.instance.reason != "Cmake build failure"):
-                self.cleanup_artifacts()
+            try:
+                mode = message.get("mode")
+                if mode == "device":
+                    self.cleanup_device_testing_artifacts()
+                elif mode == "passed" or (mode == "all" and self.instance.reason != "CMake build failure"):
+                    self.cleanup_artifacts()
+            except StatusAttributeError as sae:
+                logger.error(str(sae))
+                self.instance.status = TwisterStatus.ERROR
+                reason = 'Incorrect status assignment'
+                self.instance.reason = reason
+                self.instance.add_missing_case_status(TwisterStatus.BLOCK, reason)
 
     def determine_testcases(self, results):
         yaml_testsuite_name = self.instance.testsuite.id
@@ -750,6 +1089,7 @@ class ProjectBuilder(FilterBuilder):
 
         if detected_cases:
             logger.debug(f"{', '.join(detected_cases)} in {elf_file}")
+            tc_keeper = {tc.name: {'status': tc.status, 'reason': tc.reason} for tc in self.instance.testcases}
             self.instance.testcases.clear()
             self.instance.testsuite.testcases.clear()
 
@@ -758,8 +1098,13 @@ class ProjectBuilder(FilterBuilder):
             # Then we can further include the new_ztest_suite info in the testcase_id.
 
             for testcase_id in detected_cases:
-                self.instance.add_testcase(name=testcase_id)
+                testcase = self.instance.add_testcase(name=testcase_id)
                 self.instance.testsuite.add_testcase(name=testcase_id)
+
+                # Keep previous statuses and reasons
+                tc_info = tc_keeper.get(testcase_id, {})
+                testcase.status = tc_info.get('status', TwisterStatus.NONE)
+                testcase.reason = tc_info.get('reason')
 
 
     def cleanup_artifacts(self, additional_keep: List[str] = []):
@@ -955,46 +1300,84 @@ class ProjectBuilder(FilterBuilder):
             with open(file_path, "wt") as file:
                 file.write(data)
 
+    @staticmethod
+    def _add_instance_testcases_to_status_counts(instance, results, decrement=False):
+        increment_value = -1 if decrement else 1
+        for tc in instance.testcases:
+            match tc.status:
+                case TwisterStatus.PASS:
+                    results.passed_cases_increment(increment_value)
+                case TwisterStatus.NOTRUN:
+                    results.notrun_cases_increment(increment_value)
+                case TwisterStatus.BLOCK:
+                    results.blocked_cases_increment(increment_value)
+                case TwisterStatus.SKIP:
+                    results.skipped_cases_increment(increment_value)
+                case TwisterStatus.FILTER:
+                    results.filtered_cases_increment(increment_value)
+                case TwisterStatus.ERROR:
+                    results.error_cases_increment(increment_value)
+                case TwisterStatus.FAIL:
+                    results.failed_cases_increment(increment_value)
+                # Statuses that should not appear.
+                # Crashing Twister at this point would be counterproductive,
+                # but having those statuses in this part of processing is an error.
+                case TwisterStatus.NONE:
+                    results.none_cases_increment(increment_value)
+                    logger.error(f'A None status detected in instance {instance.name},'
+                                 f' test case {tc.name}.')
+                case TwisterStatus.STARTED:
+                    results.started_cases_increment(increment_value)
+                    logger.error(f'A started status detected in instance {instance.name},'
+                                 f' test case {tc.name}.')
+                case _:
+                    logger.error(f'An unknown status "{tc.status}" detected in instance {instance.name},'
+                                 f' test case {tc.name}.')
+
+
     def report_out(self, results):
-        total_to_do = results.total
+        total_to_do = results.total - results.skipped_filter
         total_tests_width = len(str(total_to_do))
-        results.done += 1
+        results.done_increment()
         instance = self.instance
         if results.iteration == 1:
-            results.cases += len(instance.testcases)
+            results.cases_increment(len(instance.testcases))
 
-        if instance.status in ["error", "failed"]:
-            if instance.status == "error":
-                results.error += 1
-                txt = " ERROR "
+        self._add_instance_testcases_to_status_counts(instance, results)
+
+        status = f'{TwisterStatus.get_color(instance.status)}{str.upper(instance.status)}{Fore.RESET}'
+
+        if instance.status in [TwisterStatus.ERROR, TwisterStatus.FAIL]:
+            if instance.status == TwisterStatus.ERROR:
+                results.error_increment()
             else:
-                results.failed += 1
-                txt = " FAILED "
+                results.failed_increment()
             if self.options.verbose:
-                status = Fore.RED + txt + Fore.RESET + instance.reason
+                status += " " + instance.reason
             else:
                 logger.error(
-                    "{:<25} {:<50} {}{}{}: {}".format(
+                    "{:<25} {:<50} {}: {}".format(
                         instance.platform.name,
                         instance.testsuite.name,
-                        Fore.RED,
-                        txt,
-                        Fore.RESET,
+                        status,
                         instance.reason))
             if not self.options.verbose:
                 self.log_info_file(self.options.inline_logs)
-        elif instance.status in ["skipped", "filtered"]:
-            status = Fore.YELLOW + "SKIPPED" + Fore.RESET
-            results.skipped_configs += 1
-            # test cases skipped at the test instance level
-            results.skipped_cases += len(instance.testsuite.testcases)
-        elif instance.status == "passed":
-            status = Fore.GREEN + "PASSED" + Fore.RESET
-            results.passed += 1
+        elif instance.status == TwisterStatus.SKIP:
+            results.skipped_configs_increment()
+        elif instance.status == TwisterStatus.FILTER:
+            results.skipped_configs_increment()
+        elif instance.status == TwisterStatus.PASS:
+            results.passed_increment()
             for case in instance.testcases:
                 # test cases skipped at the test case level
-                if case.status == 'skipped':
-                    results.skipped_cases += 1
+                if case.status == TwisterStatus.SKIP:
+                    results.skipped_cases_increment()
+        elif instance.status == TwisterStatus.NOTRUN:
+            results.notrun_increment()
+            for case in instance.testcases:
+                if case.status == TwisterStatus.SKIP:
+                    results.skipped_cases_increment()
         else:
             logger.debug(f"Unknown status = {instance.status}")
             status = Fore.YELLOW + "UNKNOWN" + Fore.RESET
@@ -1002,7 +1385,7 @@ class ProjectBuilder(FilterBuilder):
         if self.options.verbose:
             if self.options.cmake_only:
                 more_info = "cmake"
-            elif instance.status in ["skipped", "filtered"]:
+            elif instance.status in [TwisterStatus.SKIP, TwisterStatus.FILTER]:
                 more_info = instance.reason
             else:
                 if instance.handler.ready and instance.run:
@@ -1015,34 +1398,44 @@ class ProjectBuilder(FilterBuilder):
                 else:
                     more_info = "build"
 
-                if ( instance.status in ["error", "failed", "timeout", "flash_error"]
+                if ( instance.status in [TwisterStatus.ERROR, TwisterStatus.FAIL]
                      and hasattr(self.instance.handler, 'seed')
                      and self.instance.handler.seed is not None ):
                     more_info += "/seed: " + str(self.options.seed)
             logger.info("{:>{}}/{} {:<25} {:<50} {} ({})".format(
-                results.done, total_tests_width, total_to_do , instance.platform.name,
+                results.done - results.skipped_filter, total_tests_width, total_to_do , instance.platform.name,
                 instance.testsuite.name, status, more_info))
 
-            if instance.status in ["error", "failed", "timeout"]:
+            if self.options.verbose > 1:
+                for tc in self.instance.testcases:
+                    color = TwisterStatus.get_color(tc.status)
+                    logger.info(f'    {" ":<{total_tests_width+25+4}} {tc.name:<75} '
+                                f'{color}{str.upper(tc.status.value):<12}{Fore.RESET}'
+                                f'{" " + tc.reason if tc.reason else ""}')
+
+            if instance.status in [TwisterStatus.ERROR, TwisterStatus.FAIL]:
                 self.log_info_file(self.options.inline_logs)
         else:
             completed_perc = 0
             if total_to_do > 0:
-                completed_perc = int((float(results.done) / total_to_do) * 100)
+                completed_perc = int((float(results.done - results.skipped_filter) / total_to_do) * 100)
 
-            sys.stdout.write("INFO    - Total complete: %s%4d/%4d%s  %2d%%  skipped: %s%4d%s, failed: %s%4d%s, error: %s%4d%s\r" % (
-                Fore.GREEN,
-                results.done,
+            sys.stdout.write("INFO    - Total complete: %s%4d/%4d%s  %2d%%  built (not run): %s%4d%s, filtered: %s%4d%s, failed: %s%4d%s, error: %s%4d%s\r" % (
+                TwisterStatus.get_color(TwisterStatus.PASS),
+                results.done - results.skipped_filter,
                 total_to_do,
                 Fore.RESET,
                 completed_perc,
-                Fore.YELLOW if results.skipped_configs > 0 else Fore.RESET,
+                TwisterStatus.get_color(TwisterStatus.NOTRUN),
+                results.notrun,
+                Fore.RESET,
+                TwisterStatus.get_color(TwisterStatus.SKIP) if results.skipped_configs > 0 else Fore.RESET,
                 results.skipped_configs,
                 Fore.RESET,
-                Fore.RED if results.failed > 0 else Fore.RESET,
+                TwisterStatus.get_color(TwisterStatus.FAIL) if results.failed > 0 else Fore.RESET,
                 results.failed,
                 Fore.RESET,
-                Fore.RED if results.error > 0 else Fore.RESET,
+                TwisterStatus.get_color(TwisterStatus.ERROR) if results.error > 0 else Fore.RESET,
                 results.error,
                 Fore.RESET
                 )
@@ -1087,8 +1480,26 @@ class ProjectBuilder(FilterBuilder):
         return args_expanded
 
     def cmake(self, filter_stages=[]):
+        args = []
+        for va in self.testsuite.extra_args.copy():
+            cond_args = va.split(":")
+            if cond_args[0] == "arch" and len(cond_args) == 3:
+                if self.instance.platform.arch == cond_args[1]:
+                    args.append(cond_args[2])
+            elif cond_args[0] == "platform" and len(cond_args) == 3:
+                if self.instance.platform.name == cond_args[1]:
+                    args.append(cond_args[2])
+            elif cond_args[0] == "simulation" and len(cond_args) == 3:
+                if self.instance.platform.simulation == cond_args[1]:
+                    args.append(cond_args[2])
+            else:
+                if cond_args[0] in ["arch", "platform", "simulation"]:
+                    logger.warning(f"Unexpected extra_args: {va}")
+                args.append(va)
+
+
         args = self.cmake_assemble_args(
-            self.testsuite.extra_args.copy(), # extra_args from YAML
+            args,
             self.instance.handler,
             self.testsuite.extra_conf_files,
             self.testsuite.extra_overlay_confs,
@@ -1106,7 +1517,7 @@ class ProjectBuilder(FilterBuilder):
                 harness.instance = self.instance
                 harness.build()
         except ConfigurationError as error:
-            self.instance.status = "error"
+            self.instance.status = TwisterStatus.ERROR
             self.instance.reason = str(error)
             logger.error(self.instance.reason)
             return
@@ -1118,7 +1529,7 @@ class ProjectBuilder(FilterBuilder):
 
         if instance.handler.ready:
             logger.debug(f"Reset instance status from '{instance.status}' to None before run.")
-            instance.status = None
+            instance.status = TwisterStatus.NONE
 
             if instance.handler.type_str == "device":
                 instance.handler.duts = self.duts
@@ -1136,7 +1547,7 @@ class ProjectBuilder(FilterBuilder):
             try:
                 harness.configure(instance)
             except ConfigurationError as error:
-                instance.status = "error"
+                instance.status = TwisterStatus.ERROR
                 instance.reason = str(error)
                 logger.error(instance.reason)
                 return
@@ -1164,7 +1575,7 @@ class ProjectBuilder(FilterBuilder):
 
     @staticmethod
     def calc_size(instance: TestInstance, from_buildlog: bool):
-        if instance.status not in ["error", "failed", "skipped"]:
+        if instance.status not in [TwisterStatus.ERROR, TwisterStatus.FAIL, TwisterStatus.SKIP]:
             if not instance.platform.type in ["native", "qemu", "unit"]:
                 generate_warning = bool(instance.platform.type == "mcu")
                 size_calc = instance.calculate_sizes(from_buildlog=from_buildlog, generate_warning=generate_warning)
@@ -1231,15 +1642,16 @@ class TwisterRunner:
         self.update_counting_before_pipeline()
 
         while True:
-            self.results.iteration += 1
+            self.results.iteration_increment()
 
             if self.results.iteration > 1:
                 logger.info("%d Iteration:" % (self.results.iteration))
                 time.sleep(self.options.retry_interval)  # waiting for the system to settle down
-                self.results.done = self.results.total - self.results.failed - self.results.error
+                self.results.done = self.results.total - self.results.failed
                 self.results.failed = 0
                 if self.options.retry_build_errors:
                     self.results.error = 0
+                    self.results.done -= self.results.error
             else:
                 self.results.done = self.results.skipped_filter
 
@@ -1275,17 +1687,17 @@ class TwisterRunner:
         the static filter stats. So need to prepare them before pipline starts.
         '''
         for instance in self.instances.values():
-            if instance.status == 'filtered' and not instance.reason == 'runtime filter':
-                self.results.skipped_filter += 1
-                self.results.skipped_configs += 1
-                self.results.skipped_cases += len(instance.testsuite.testcases)
-                self.results.cases += len(instance.testsuite.testcases)
-            elif instance.status == 'error':
-                self.results.error += 1
+            if instance.status == TwisterStatus.FILTER and not instance.reason == 'runtime filter':
+                self.results.skipped_filter_increment()
+                self.results.skipped_configs_increment()
+                self.results.filtered_cases_increment(len(instance.testsuite.testcases))
+                self.results.cases_increment(len(instance.testsuite.testcases))
+            elif instance.status == TwisterStatus.ERROR:
+                self.results.error_increment()
 
     def show_brief(self):
         logger.info("%d test scenarios (%d test instances) selected, "
-                    "%d configurations skipped (%d by static filter, %d at runtime)." %
+                    "%d configurations filtered (%d by static filter, %d at runtime)." %
                     (len(self.suites), len(self.instances),
                     self.results.skipped_configs,
                     self.results.skipped_filter,
@@ -1296,15 +1708,18 @@ class TwisterRunner:
             if build_only:
                 instance.run = False
 
-            no_retry_statuses = ['passed', 'skipped', 'filtered']
+            no_retry_statuses = [TwisterStatus.PASS, TwisterStatus.SKIP, TwisterStatus.FILTER, TwisterStatus.NOTRUN]
             if not retry_build_errors:
-                no_retry_statuses.append("error")
+                no_retry_statuses.append(TwisterStatus.ERROR)
 
             if instance.status not in no_retry_statuses:
                 logger.debug(f"adding {instance.name}")
-                if instance.status:
+                if instance.status != TwisterStatus.NONE:
                     instance.retries += 1
-                instance.status = None
+                instance.status = TwisterStatus.NONE
+                # Previous states should be removed from the stats
+                if self.results.iteration > 1:
+                    ProjectBuilder._add_instance_testcases_to_status_counts(instance, self.results, decrement=True)
 
                 # Check if cmake package_helper script can be run in advance.
                 instance.filter_stages = []
